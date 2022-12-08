@@ -1,0 +1,355 @@
+---
+title: "03_cz"
+author: "Crystal Zang"
+date: '2022-11-15'
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library('annotate')
+library('data.table')
+library('foreach')
+library('ggplot2')
+library('limma')
+library('limorhyde')
+# library('org.Mm.eg.db')
+library('qs')
+library(splines)
+
+library(edgeR)
+library(overlap)
+
+library(tibble)
+library(dplyr)
+library(tidyr)
+library(card)
+library(cosinor)
+
+library(gridExtra)
+library(grid)
+library(ggplot2)
+library(lattice)
+
+```
+
+
+```{r}
+load("/Users/czang/Documents/2069Omics/BIOST-2069-Project/data/TSexampleData.rdata")
+source("~/Documents/2069Omics/BIOST-2069-Project/code/TimeStampFns.R")
+```
+
+
+# functions
+```{r}
+var_est <- function(data){
+    subjects <- unique(data$sID)
+    phi_ls <- c()
+    for (i in (1: length(subjects))){
+      subj <- subjects[i]
+      
+      dt = data%>%
+        filter(sID == subj)
+      
+      model = lm(gene_i ~ sin(time * 3.1416 / 12)+ cos(time*3.1416/12), data= dt)
+      b1 = model$coefficients[2] #coef for sin
+      b2 = model$coefficients[3] #coef for cos
+      phi <- atan2(b1,b2) 
+      phi_ls[i]  = phi
+  }
+  phi_circular = circular(phi_ls, units= "radians", modulo = "2pi")
+  var = round(angular.variance(phi_circular),digits=4)
+  return(var)
+  }
+```
+
+```{r}
+DE_limmaF = function(ctx, full_model, label, out.dir){
+  fit.ctx = eBayes(contrasts.fit(full_model, ctx))%>%topTable(n = nrow(full_model$coefficient))
+  fit.ctx$ID <- rownames(fit.ctx)
+  fit.ctx$GeneSymbol = names(symbol[match(fit.ctx$ID, symbol)])
+  # symbol[match(rownames(fit.ctx), names(symbol))]   # genesBM$mgi_symbol[match(rownames(fit.ctx), genesBM$ensembl_gene_id)]
+  write.csv(fit.ctx, paste0(out.dir, "/DE_limmaF_", label, ".csv"))
+  return(fit.ctx)
+}
+
+
+
+all.expr <- all.expr[,order(colnames(all.expr))]
+all.meta <- all.meta[order(all.meta$samp),]
+
+all.meta <- all.meta[which(!is.na(all.meta$CPhrs)),] #cphrs: internal clock time
+all.expr <- all.expr[,which(colnames(all.expr) %in% all.meta$samp)]
+```
+
+
+
+
+```{r}
+a = "TrTe"
+# clean meta data
+a.meta = all.meta[which(all.meta$study==a),]
+cond = factor(a.meta$cond) # , levels = c(0, 1))
+table(cond) #181 treatment samples
+
+a.meta = a.meta[which(a.meta$cond==1),] #only select treatment samples
+hist(a.meta$LocalTime)
+
+
+a.meta$ZT_time_sin = sin(a.meta$LocalTime*pi/12)
+a.meta$ZT_time_cos = cos(a.meta$LocalTime*pi/12)
+
+
+a.meta$ICT_time_sin = sin(a.meta$CPhrs*pi/12)
+a.meta$ICT_time_cos = cos(a.meta$CPhrs*pi/12)
+
+#clean expression data
+a.expr <- all.expr[, which(colnames(all.expr) %in% a.meta$samp)] #select expression data where the samples met criteria
+
+gene_names <- rownames(a.expr)
+a.expr.t <- t(a.expr)
+
+library(dutchmasters)
+library(ggplot2)
+meta_check <- a.meta%>%
+  dplyr::select(samp,sID, LocalTime, CPhrs)%>%
+  mutate(diff = LocalTime-CPhrs)%>%
+  mutate(diff = if_else(diff > 12, diff-24, 
+                        if_else(diff < -12, diff+ 24,
+                        diff)))%>%
+  group_by(sID)%>%
+  mutate(mean = mean(diff))%>%
+  mutate(sID = substr(sID, 6,11))
+
+#png("/Users/czang/Documents/2069Omics/BIOST-2069-Project/fig/zt_ict_scatterplot.png", units="in", width=8.5, height=5.5, res=250)
+ggplot(data = meta_check, aes(x = CPhrs, y = LocalTime)) +
+  geom_point()  + 
+  aes(colour = sID) + 
+  theme(legend.position = "right")+ 
+  labs(title = "Scatter Plot of Internal Clock Time versus Local Time")+ 
+  ylab("local time (hour)")+
+  xlab("internal clock time (hour)")+
+  scale_color_dutchmasters(palette = "milkmaid")+
+  theme_bw()+
+  geom_abline(cex=0.3, color="brown", alpha=1)+
+  geom_abline(cex=7, color="brown", alpha=0.07)+
+  geom_abline(cex=20, color="brown", alpha=0.1)
+#dev.off()
+
+
+# ggplot(df, aes(y = string, x = start, colour = string)) +
+#   geom_segment(aes(yend = string, xend = end), size = 3) +
+#   scale_color_manual(values = c("yellowgreen", "violet")) +
+#   theme_bw() +
+#   coord_fixed(20) +
+#   labs(x = "Position")
+
+library(forcats)
+meta_check_c  <- meta_check%>%
+  group_by(sID)%>%
+  summarize(LocalTime=first(LocalTime), CPhrs= first(CPhrs))%>%
+  mutate(ICT = abs(LocalTime-CPhrs), ZT=0)%>%
+  mutate(sID = fct_reorder(sID, ICT)) 
+
+#png("/Users/czang/Documents/2069Omics/BIOST-2069-Project/fig/diff_bt_ict_zt.png", units="in", width=8, height=4, res=250)
+ggplot(meta_check_c,
+	aes(x = time,	y = sID)) +
+labs(x = "time (hour)",
+	y = "subject",
+	title= "Difference between Internal Clock Time and Local Time") +
+geom_segment(aes(x = ICT,
+		y = sID,
+		xend = ZT,
+		yend = sID),
+	size = 1) +
+geom_point(aes(x = ICT,
+	color = "ICT (Internal Clock Time)"),
+	size = 4, shape = 15) +
+geom_point(aes(x = ZT,
+	color = "ZT (Local Time)"),
+	size = 4, shape = 15) +
+  scale_color_dutchmasters(palette = "milkmaid")+
+  theme_bw()
+#dev.off()
+```
+
+# find dissimilar genes 
+```{r}
+# method 1. compare p-value
+# rhyLimma <-  inner_join(rhyLimma_ICT_Summary, rhyLimma_ZT_Summary, by= "gene_id")
+# rhyLimma <- rhyLimma%>%
+#   mutate(P.Val.diff = abs(P.Value.ICT-P.Value.ZT))
+# 
+# dissimilar_genes <- rhyLimma%>%
+#  # filter(P.Val.diff >0.5)%>%
+#   arrange(desc(P.Val.diff))%>%
+#   pull(gene_id)
+
+
+
+# method 2. compare variance of phi
+# this will run for a long time
+# gene_names <- rownames(a.expr)
+# var_zt <- c()
+# var_ict <- c()
+# for (i in 1: length(gene_names)){
+#   print(i)
+#   gene_name <- gene_names[i]
+#   gene_i <- as.data.frame(a.expr.t[,gene_name])
+# 
+#   gene_i <- gene_i%>%
+#     rownames_to_column("samp")
+#   colnames(gene_i) <- c("samp", "gene_i")
+# 
+#   a.meta.time <- a.meta%>%
+#     select(samp,sID, LocalTime, CPhrs)%>%
+#     left_join(gene_i, by = "samp")%>%
+#     gather(class, time, -c(samp,sID, gene_i))
+# 
+#   zt <- a.meta.time%>%
+#     filter(class == "LocalTime")
+#   ict <- a.meta.time%>%
+#     filter(class == "CPhrs")
+#   
+#   var_zt[i] = var_est(zt)
+#   var_ict[i] = var_est(ict)
+# }    
+
+
+
+# dissimilar_genes <- as.data.frame(cbind(gene_names, var_zt, var_ict))
+# dissimilar_genes$var_zt <- as.numeric(dissimilar_genes$var_zt)
+# dissimilar_genes$var_ict <- as.numeric(dissimilar_genes$var_ict)
+
+#write.csv(dissimilar_genes, "/Users/czang/Documents/2069Omics/BIOST-2069-Project/data/dissimilar_genes_var.csv", row.names = F)
+
+#library(readr)
+
+dissimilar_genes <- read_csv("dissimilar_genes_var.csv")
+
+dissimilar_genes<- dissimilar_genes%>%
+  mutate(var_diff = abs(var_zt-var_ict))%>%
+  arrange(desc(var_diff))%>%
+  filter(var_diff>0.35)%>%
+  pull(gene_names)
+
+```
+
+```{r message=FALSE, warning=FALSE, eval=FALSE}
+library(patchwork)
+library(circular)
+
+
+#gene_names <-  dissimilar_genes
+#plot_ls <- list()
+#for (i in 1: length(gene_names)){
+#for (i in 1: 5){
+  print(i)
+  #gene_name <- gene_names[i]
+  #gene_i <- as.data.frame(a.expr.t[,gene_name])
+  
+  gene_name = "DCAF4"
+  gene_i <- as.data.frame(a.expr.t[,"DCAF4"])
+ 
+  gene_i <- gene_i%>%
+    rownames_to_column("samp")
+  colnames(gene_i) <- c("samp", "gene_i")
+
+  a.meta.time <- a.meta%>%
+    mutate(sID= substr(sID, 6,11))%>%
+    dplyr::select(samp, sID, LocalTime, CPhrs)%>%
+    left_join(gene_i, by = "samp")%>%
+    gather(class, time, -c(samp,sID, gene_i))%>%
+    group_by(class,sID)%>%
+    mutate(mean = mean(gene_i), sd = sd(gene_i))%>%
+   # filter(quantile(a.meta$sd, 0.50,na.rm=T) > sd) %>%
+    filter(sd > 0.2) #TODO: change this.
+
+  zt <- a.meta.time%>%
+    filter(class == "LocalTime")
+  ict <- a.meta.time%>%
+    filter(class == "CPhrs")
+  
+  var_zt <- var_est(zt)# radian
+  var_zt <- round(var_zt* (3.819718634205)^2, digits=2)  #hour
+  label_zt <- paste("Local Time \n Var(Peak) =", var_zt, "hour")
+  
+  var_ict <- var_est(ict) #radian
+  var_ict <- round(var_ict* (3.819718634205)^2, digits=2)  #hour
+  label_ict <- paste("Internal Clock Time \n Var(Peak) =", var_ict, "hour")
+    
+  a.meta.time <- a.meta.time%>%
+    mutate(class = if_else(class == "LocalTime", label_zt, label_ict  ))
+
+  
+    #png("/Users/czang/Documents/2069Omics/BIOST-2069-Project/fig/DCAF4.png", units="in", width=8.6, height=4, res=250)
+   #plot_ls[[i]] <- 
+     ggplot(a.meta.time, aes(x=time, y=gene_i, color=sID)) +
+      geom_point(aes(shape=sID))+ 
+      geom_smooth(method = lm, formula = y~ sin(x * 3.1416 / 12)+ cos(x*3.1416/12) ,se=FALSE, fullrange=TRUE)+
+      theme_bw()+
+       ggtitle(paste("Gene: ",gene_name))+
+       ylab( "gene expression") + # for the main title
+       xlab("time(hour)")+
+       facet_wrap(~ class) + 
+     theme(legend.position = "right")+
+  scale_color_dutchmasters(palette = "milkmaid") + 
+       theme(text = element_text(size = 15),legend.text = element_text(size = 8) )  
+     #dev.off()
+#}
+
+
+#ml <- marrangeGrob(plot_ls, nrow=4, ncol=2)
+
+
+# pdf("/Users/czang/Documents/2069Omics/BIOST-2069-Project/diagnosis_dissimilar_genes_phi.pdf", 18,18)
+# ml
+# dev.off()
+```
+
+
+
+
+
+```{r}
+## combining results
+rhyLimma <-  inner_join(rhyLimma_ICT_Summary, rhyLimma_ZT_Summary, by= "gene_id")
+rhyLimma <- rhyLimma%>%
+  mutate(P.Val.diff = abs(P.Value.ICT-P.Value.ZT))
+
+
+dissimilar_genes <- rhyLimma%>%
+ # filter(P.Val.diff >0.5)%>%
+  arrange(desc(P.Val.diff))%>%
+  pull(gene_id)
+
+ggplot(data = rhyLimma, aes(x = adj.P.Val.ICT, y = adj.P.Val.ZT)) + geom_point()  + labs(title = "")
+
+```
+
+```{r}
+library(dplyr)
+
+rhyGenes <- list()
+p_vals <- c(0.00000000001,0.00001, 0.0001, 0.001, 0.01, 0.05, 0.1, 0.2, 0.3)
+for (i in 1:length(p_vals)) {
+  p = p_vals[i]
+  rhyGenes_i <- rhyLimma_ICT_Summary%>%
+    filter(adj.P.Val.ICT < p)%>%
+    pull(gene_id)
+  rhyGenes[[i]] = rhyGenes_i
+}
+g <- rhyGenes[[1]]
+
+
+```
+
+
+
+
+
